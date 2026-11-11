@@ -6,6 +6,7 @@ const {
   REST,
   Routes,
   ChannelType,
+  MessageFlags,
 } = require('discord.js');
 const {
   joinVoiceChannel,
@@ -15,7 +16,7 @@ const {
 } = require('@discordjs/voice');
 
 const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID; // Application ID from Discord Developer Portal
+const CLIENT_ID = process.env.CLIENT_ID;
 
 // Only this user can use /join and /leave
 const ALLOWED_USER_ID = '1291129443376562247';
@@ -32,7 +33,6 @@ const client = new Client({
   ],
 });
 
-// Store connections per guild so we can manage them
 const connections = new Map();
 
 async function registerCommands() {
@@ -56,7 +56,6 @@ async function registerCommands() {
       console.log('Successfully registered global slash commands.');
     } else {
       console.warn('CLIENT_ID not set. Slash commands will not be registered automatically.');
-      console.warn('Set CLIENT_ID (Application ID) in Railway variables for auto-registration.');
     }
   } catch (error) {
     console.error('Failed to register commands:', error);
@@ -98,7 +97,7 @@ function createConnection(channel) {
   return connection;
 }
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   console.log(`Allowed user ID: ${ALLOWED_USER_ID}`);
   client.user.setActivity('24/7 Voice', { type: 3 });
@@ -108,42 +107,64 @@ client.once('ready', async () => {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  const { commandName, guild, user } = interaction;
+  const { commandName, user } = interaction;
 
   console.log(`Command /${commandName} from ${user.tag} (${user.id})`);
 
-  // Always acknowledge the interaction within 3 seconds
   try {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   } catch (err) {
     console.error('Failed to defer reply:', err);
     return;
   }
 
-  // Only allow the specified user
   if (user.id !== ALLOWED_USER_ID) {
     return interaction.editReply({
       content: 'You are not allowed to use this command.',
     });
   }
 
+  // Must be used in a server
+  const guild = interaction.guild;
+  if (!guild) {
+    return interaction.editReply({
+      content: 'This command can only be used inside a server.',
+    });
+  }
+
   if (commandName === 'join') {
     try {
-      // Reliably get the user's voice channel
-      // 1. Try voiceStates cache first
-      let voiceChannel = guild.voiceStates.cache.get(user.id)?.channel;
+      // Get voice channel reliably
+      let voiceChannel = null;
 
-      // 2. If not found, fetch the member (forces update)
+      // Method 1: voiceStates cache
+      const voiceState = guild.voiceStates.cache.get(user.id);
+      if (voiceState?.channel) {
+        voiceChannel = voiceState.channel;
+      }
+
+      // Method 2: fetch member
       if (!voiceChannel) {
         const member = await guild.members.fetch(user.id).catch(() => null);
-        voiceChannel = member?.voice?.channel ?? null;
+        if (member?.voice?.channel) {
+          voiceChannel = member.voice.channel;
+        }
+      }
+
+      // Method 3: interaction.member (fallback)
+      if (!voiceChannel && interaction.member?.voice?.channel) {
+        voiceChannel = interaction.member.voice.channel;
       }
 
       if (!voiceChannel) {
+        console.log(`No voice channel found for user ${user.id} in guild ${guild.id}`);
+        console.log(`Voice states in cache: ${guild.voiceStates.cache.size}`);
         return interaction.editReply({
           content: 'You need to be in a voice channel first! Join a voice channel, then run /join again.',
         });
       }
+
+      console.log(`Found voice channel: ${voiceChannel.name} (${voiceChannel.id})`);
 
       if (
         voiceChannel.type !== ChannelType.GuildVoice &&
@@ -154,7 +175,7 @@ client.on('interactionCreate', async (interaction) => {
         });
       }
 
-      const me = guild.members.me;
+      const me = guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
       if (!me) {
         return interaction.editReply({
           content: 'Could not find me in this server. Please re-invite the bot.',
@@ -168,7 +189,7 @@ client.on('interactionCreate', async (interaction) => {
         });
       }
 
-      // Destroy existing connection if any
+      // Leave existing connection if any
       const existing = getVoiceConnection(guild.id);
       if (existing) {
         existing.destroy();
@@ -184,7 +205,7 @@ client.on('interactionCreate', async (interaction) => {
         content: `Joined **${voiceChannel.name}** and will stay here 24/7!`,
       });
 
-      console.log(`[${guild.name}] Joined ${voiceChannel.name}`);
+      console.log(`[${guild.name}] Successfully joined ${voiceChannel.name}`);
     } catch (error) {
       console.error('Failed to join voice channel:', error);
       try {
