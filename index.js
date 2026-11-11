@@ -17,6 +17,9 @@ const {
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID; // Application ID from Discord Developer Portal
 
+// Only this user can use /join and /leave
+const ALLOWED_USER_ID = '1291129443376562247';
+
 if (!TOKEN) {
   console.error('Missing DISCORD_TOKEN environment variable');
   process.exit(1);
@@ -107,6 +110,14 @@ client.once('ready', async () => {
 
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
+
+  // Only allow the specified user
+  if (interaction.user.id !== ALLOWED_USER_ID) {
+    return interaction.reply({
+      content: 'You are not allowed to use this command.',
+      ephemeral: true,
+    });
+  }
 
   const { commandName, member, guild } = interaction;
 
