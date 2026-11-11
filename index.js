@@ -108,7 +108,7 @@ client.once('ready', async () => {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  const { commandName, member, guild, user } = interaction;
+  const { commandName, guild, user } = interaction;
 
   console.log(`Command /${commandName} from ${user.tag} (${user.id})`);
 
@@ -129,11 +129,19 @@ client.on('interactionCreate', async (interaction) => {
 
   if (commandName === 'join') {
     try {
-      const voiceChannel = member?.voice?.channel;
+      // Reliably get the user's voice channel
+      // 1. Try voiceStates cache first
+      let voiceChannel = guild.voiceStates.cache.get(user.id)?.channel;
+
+      // 2. If not found, fetch the member (forces update)
+      if (!voiceChannel) {
+        const member = await guild.members.fetch(user.id).catch(() => null);
+        voiceChannel = member?.voice?.channel ?? null;
+      }
 
       if (!voiceChannel) {
         return interaction.editReply({
-          content: 'You need to be in a voice channel first!',
+          content: 'You need to be in a voice channel first! Join a voice channel, then run /join again.',
         });
       }
 
