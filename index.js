@@ -52,7 +52,6 @@ async function registerCommands() {
   try {
     console.log('Registering slash commands...');
     if (CLIENT_ID) {
-      // Global commands (can take up to 1 hour to propagate)
       await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
       console.log('Successfully registered global slash commands.');
     } else {
@@ -69,20 +68,17 @@ function createConnection(channel) {
     channelId: channel.id,
     guildId: channel.guild.id,
     adapterCreator: channel.guild.voiceAdapterCreator,
-    selfDeaf: true,  // Bot is deafened (doesn't need to hear)
-    selfMute: false, // Can speak if needed later
+    selfDeaf: true,
+    selfMute: false,
   });
 
-  // Handle disconnects and try to recover for 24/7 uptime
   connection.on(VoiceConnectionStatus.Disconnected, async () => {
     try {
       await Promise.race([
         entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
         entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
       ]);
-      // Reconnecting (e.g. channel move) - do nothing
     } catch {
-      // Real disconnect - destroy and clean up
       try {
         connection.destroy();
       } catch {}
@@ -104,95 +100,119 @@ function createConnection(channel) {
 
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
-  client.user.setActivity('24/7 Voice', { type: 3 }); // Watching
+  console.log(`Allowed user ID: ${ALLOWED_USER_ID}`);
+  client.user.setActivity('24/7 Voice', { type: 3 });
   await registerCommands();
 });
 
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
+  const { commandName, member, guild, user } = interaction;
+
+  console.log(`Command /${commandName} from ${user.tag} (${user.id})`);
+
+  // Always acknowledge the interaction within 3 seconds
+  try {
+    await interaction.deferReply({ ephemeral: true });
+  } catch (err) {
+    console.error('Failed to defer reply:', err);
+    return;
+  }
+
   // Only allow the specified user
-  if (interaction.user.id !== ALLOWED_USER_ID) {
-    return interaction.reply({
+  if (user.id !== ALLOWED_USER_ID) {
+    return interaction.editReply({
       content: 'You are not allowed to use this command.',
-      ephemeral: true,
     });
   }
 
-  const { commandName, member, guild } = interaction;
-
   if (commandName === 'join') {
-    const voiceChannel = member.voice.channel;
-
-    if (!voiceChannel) {
-      return interaction.reply({
-        content: 'You need to be in a voice channel first!',
-        ephemeral: true,
-      });
-    }
-
-    if (voiceChannel.type !== ChannelType.GuildVoice && voiceChannel.type !== ChannelType.GuildStageVoice) {
-      return interaction.reply({
-        content: 'That is not a valid voice channel.',
-        ephemeral: true,
-      });
-    }
-
-    // Check permissions
-    const permissions = voiceChannel.permissionsFor(guild.members.me);
-    if (!permissions.has(['Connect', 'Speak'])) {
-      return interaction.reply({
-        content: 'I need **Connect** and **Speak** permissions in that channel.',
-        ephemeral: true,
-      });
-    }
-
-    // Destroy existing connection if any
-    const existing = getVoiceConnection(guild.id);
-    if (existing) {
-      existing.destroy();
-      connections.delete(guild.id);
-    }
-
     try {
+      const voiceChannel = member?.voice?.channel;
+
+      if (!voiceChannel) {
+        return interaction.editReply({
+          content: 'You need to be in a voice channel first!',
+        });
+      }
+
+      if (
+        voiceChannel.type !== ChannelType.GuildVoice &&
+        voiceChannel.type !== ChannelType.GuildStageVoice
+      ) {
+        return interaction.editReply({
+          content: 'That is not a valid voice channel.',
+        });
+      }
+
+      const me = guild.members.me;
+      if (!me) {
+        return interaction.editReply({
+          content: 'Could not find me in this server. Please re-invite the bot.',
+        });
+      }
+
+      const permissions = voiceChannel.permissionsFor(me);
+      if (!permissions || !permissions.has(['Connect', 'Speak'])) {
+        return interaction.editReply({
+          content: 'I need **Connect** and **Speak** permissions in that channel.',
+        });
+      }
+
+      // Destroy existing connection if any
+      const existing = getVoiceConnection(guild.id);
+      if (existing) {
+        existing.destroy();
+        connections.delete(guild.id);
+      }
+
       const connection = createConnection(voiceChannel);
       connections.set(guild.id, connection);
 
       await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
 
-      await interaction.reply({
+      await interaction.editReply({
         content: `Joined **${voiceChannel.name}** and will stay here 24/7!`,
       });
 
       console.log(`[${guild.name}] Joined ${voiceChannel.name}`);
     } catch (error) {
       console.error('Failed to join voice channel:', error);
-      await interaction.reply({
-        content: 'Failed to join the voice channel. Please try again.',
-        ephemeral: true,
-      });
+      try {
+        await interaction.editReply({
+          content: `Failed to join the voice channel: ${error.message || 'Unknown error'}`,
+        });
+      } catch {}
     }
   }
 
   if (commandName === 'leave') {
-    const connection = getVoiceConnection(guild.id);
+    try {
+      const connection = getVoiceConnection(guild.id);
 
-    if (!connection) {
-      return interaction.reply({
-        content: 'I am not in a voice channel.',
-        ephemeral: true,
-      });
+      if (!connection) {
+        return interaction.editReply({
+          content: 'I am not in a voice channel.',
+        });
+      }
+
+      connection.destroy();
+      connections.delete(guild.id);
+
+      await interaction.editReply({ content: 'Left the voice channel.' });
+      console.log(`[${guild.name}] Left voice channel`);
+    } catch (error) {
+      console.error('Failed to leave voice channel:', error);
+      try {
+        await interaction.editReply({
+          content: `Failed to leave: ${error.message || 'Unknown error'}`,
+        });
+      } catch {}
     }
-
-    connection.destroy();
-    connections.delete(guild.id);
-
-    await interaction.reply({ content: 'Left the voice channel.' });
-    console.log(`[${guild.name}] Left voice channel`);
   }
 });
 
-// Keep the process alive and log unhandled errors
 process.on('unhandledRejection', (error) => {
   console.error('Unhandled rejection:', error);
 });
